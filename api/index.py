@@ -22,6 +22,14 @@ def handler(request):
     Vercel serverless function handler for Flask app
     """
     try:
+        # Debug: Log the entire request structure
+        print(f"DEBUG - Request type: {type(request)}")
+        print(f"DEBUG - Request is dict: {isinstance(request, dict)}")
+        if isinstance(request, dict):
+            print(f"DEBUG - Request keys: {list(request.keys())}")
+        else:
+            print(f"DEBUG - Request attributes: {dir(request)}")
+        
         # Handle app initialization error
         if app is None:
             return {
@@ -84,25 +92,45 @@ def handler(request):
         
         # Handle OPTIONS preflight requests
         if method == 'OPTIONS':
-            origin = headers_dict.get('origin', '*')
-            # In Vercel, always allow the origin if it's a vercel.app domain, otherwise allow all
-            if origin and origin != '*' and (origin.endswith('.vercel.app') or origin.endswith('vercel.app')):
-                cors_origin = origin
-                cors_credentials = 'true'
+            origin = headers_dict.get('origin') or headers_dict.get('Origin') or '*'
+            print(f"DEBUG OPTIONS - Request origin: {origin}")
+            
+            # Determine CORS origin
+            if origin and origin != '*' and isinstance(origin, str):
+                if '.vercel.app' in origin or origin.endswith('vercel.app'):
+                    cors_origin = origin
+                    cors_credentials = 'true'
+                else:
+                    cors_origin = '*'
+                    cors_credentials = 'false'
             else:
-                # Allow all origins in Vercel environment
-                cors_origin = origin if origin != '*' else '*'
-                cors_credentials = 'true' if origin and origin != '*' else 'false'
+                cors_origin = '*'
+                cors_credentials = 'false'
+            
+            print(f"DEBUG OPTIONS - Setting CORS origin to: {cors_origin}")
+            
+            # Return with both uppercase and lowercase headers
+            cors_headers = {
+                'Access-Control-Allow-Origin': cors_origin,
+                'access-control-allow-origin': cors_origin,
+                'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+                'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+                'access-control-allow-headers': 'Content-Type, Authorization',
+                'Access-Control-Max-Age': '3600',
+                'access-control-max-age': '3600'
+            }
+            
+            if cors_credentials == 'true':
+                cors_headers['Access-Control-Allow-Credentials'] = 'true'
+                cors_headers['access-control-allow-credentials'] = 'true'
+            
+            # Ensure all values are strings
+            cors_headers_clean = {str(k): str(v) for k, v in cors_headers.items()}
             
             return {
                 'statusCode': 200,
-                'headers': {
-                    'Access-Control-Allow-Origin': cors_origin,
-                    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-                    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-                    'Access-Control-Allow-Credentials': cors_credentials,
-                    'Access-Control-Max-Age': '3600'
-                },
+                'headers': cors_headers_clean,
                 'body': ''
             }
         
@@ -195,36 +223,51 @@ def handler(request):
         
         # Always add CORS headers to ensure they're present
         # Get origin from headers (case-insensitive now)
-        origin = headers_dict.get('origin', '*')
+        origin = headers_dict.get('origin') or headers_dict.get('Origin') or '*'
         
         # Debug logging (will appear in Vercel logs)
-        print(f"Request origin: {origin}")
-        print(f"All headers: {headers_dict}")
+        print(f"DEBUG - Request origin: {origin}")
+        print(f"DEBUG - All headers keys: {list(headers_dict.keys())}")
+        print(f"DEBUG - Headers dict: {headers_dict}")
         
-        # ALWAYS set CORS headers - override any Flask headers
-        # In Vercel, allow the specific origin if it's a vercel.app domain, otherwise allow all
-        if origin and origin != '*' and (origin.endswith('.vercel.app') or origin.endswith('vercel.app')):
-            final_headers['Access-Control-Allow-Origin'] = origin
-            final_headers['Access-Control-Allow-Credentials'] = 'true'
-            print(f"Setting CORS origin to: {origin}")
+        # SIMPLIFIED: Always echo back the origin if it's a vercel.app domain, otherwise use *
+        # This is the most permissive approach that should work
+        if origin and origin != '*' and isinstance(origin, str):
+            # If it's a vercel.app domain, use it; otherwise use *
+            if '.vercel.app' in origin or origin.endswith('vercel.app'):
+                cors_origin = origin
+            else:
+                cors_origin = '*'
         else:
-            # Allow all origins (or the specific origin if provided)
-            cors_origin = origin if origin != '*' else '*'
-            final_headers['Access-Control-Allow-Origin'] = cors_origin
-            if origin and origin != '*':
-                final_headers['Access-Control-Allow-Credentials'] = 'true'
-            print(f"Setting CORS origin to: {cors_origin}")
+            cors_origin = '*'
         
-        # ALWAYS set these CORS headers (override any existing ones)
+        # ALWAYS override CORS headers - these must be present
+        # Use both uppercase and lowercase keys to ensure compatibility
+        final_headers['Access-Control-Allow-Origin'] = cors_origin
+        final_headers['access-control-allow-origin'] = cors_origin  # Lowercase version
         final_headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        final_headers['access-control-allow-headers'] = 'Content-Type, Authorization'
         final_headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        final_headers['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
         final_headers['Access-Control-Expose-Headers'] = 'Authorization'
+        final_headers['access-control-expose-headers'] = 'Authorization'
         
-        print(f"Final response headers: {final_headers}")
+        # Only add credentials if we have a specific origin (not *)
+        if cors_origin != '*':
+            final_headers['Access-Control-Allow-Credentials'] = 'true'
+            final_headers['access-control-allow-credentials'] = 'true'
+        
+        print(f"DEBUG - Setting CORS origin to: {cors_origin}")
+        print(f"DEBUG - Final headers: {final_headers}")
+        
+        # Return response - ensure headers are strings
+        response_headers_clean = {}
+        for k, v in final_headers.items():
+            response_headers_clean[str(k)] = str(v)
         
         return {
             'statusCode': status_code[0],
-            'headers': final_headers,
+            'headers': response_headers_clean,
             'body': response_body
         }
     except Exception as e:
