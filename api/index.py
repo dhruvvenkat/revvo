@@ -5,15 +5,48 @@ from io import BytesIO
 from urllib.parse import urlparse, parse_qs, quote
 
 # Add the server directory to the path
-server_path = os.path.join(os.path.dirname(__file__), '..', 'server')
-sys.path.insert(0, os.path.abspath(server_path))
-
 try:
+    # Get the absolute path to the server directory
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    server_path = os.path.join(current_dir, '..', 'server')
+    server_path = os.path.abspath(server_path)
+    
+    print(f"DEBUG - Current file: {__file__}")
+    print(f"DEBUG - Current dir: {current_dir}")
+    print(f"DEBUG - Server path: {server_path}")
+    print(f"DEBUG - Server path exists: {os.path.exists(server_path)}")
+    
+    if os.path.exists(server_path):
+        sys.path.insert(0, server_path)
+        print(f"DEBUG - Added {server_path} to sys.path")
+        print(f"DEBUG - sys.path: {sys.path[:3]}")  # Print first 3 entries
+    else:
+        print(f"ERROR - Server path does not exist: {server_path}")
+        # Try alternative path
+        alt_path = os.path.join(current_dir, 'server')
+        if os.path.exists(alt_path):
+            sys.path.insert(0, alt_path)
+            print(f"DEBUG - Using alternative path: {alt_path}")
+        else:
+            print(f"ERROR - Alternative path also does not exist: {alt_path}")
+    
     from app import create_app
     # Create Flask app instance
-    print("DEBUG - Initializing Flask app...")
+    print("DEBUG - Successfully imported create_app, initializing Flask app...")
     app = create_app()
     print("DEBUG - Flask app initialized successfully")
+    app_error = None
+    app_error_trace = None
+except ImportError as e:
+    # If import fails, we'll handle it in the handler
+    import traceback
+    app_init_trace = traceback.format_exc()
+    print(f"ERROR - Import error: {str(e)}")
+    print(f"ERROR - Import traceback:\n{app_init_trace}")
+    print(f"ERROR - sys.path: {sys.path}")
+    app = None
+    app_error = f"Import error: {str(e)}"
+    app_error_trace = app_init_trace
 except Exception as e:
     # If app creation fails, we'll handle it in the handler
     import traceback
