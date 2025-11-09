@@ -65,22 +65,34 @@ def handler(request):
         if not path.startswith('/'):
             path = '/' + path
         
+        # Get headers - make case-insensitive (do this early for OPTIONS handling)
+        headers_dict_raw = request.get('headers', {})
+        if not isinstance(headers_dict_raw, dict):
+            # Try to convert to dict
+            if hasattr(headers_dict_raw, '__dict__'):
+                headers_dict_raw = headers_dict_raw.__dict__
+            else:
+                headers_dict_raw = {}
+        
+        # Normalize headers to lowercase keys for easier access
+        headers_dict = {}
+        for k, v in headers_dict_raw.items():
+            headers_dict[k.lower()] = v
+        
         # Get HTTP method
         method = request.get('method', 'GET').upper()
         
         # Handle OPTIONS preflight requests
         if method == 'OPTIONS':
-            origin = headers_dict.get('origin') or headers_dict.get('Origin', '*')
-            # Allow vercel.app domains or use the origin if provided
-            if origin and (origin.endswith('.vercel.app') or origin.endswith('vercel.app')):
+            origin = headers_dict.get('origin', '*')
+            # In Vercel, always allow the origin if it's a vercel.app domain, otherwise allow all
+            if origin and origin != '*' and (origin.endswith('.vercel.app') or origin.endswith('vercel.app')):
                 cors_origin = origin
                 cors_credentials = 'true'
-            elif os.getenv('VERCEL') or os.getenv('VERCEL_ENV'):
-                cors_origin = origin if origin else '*'
-                cors_credentials = 'true' if origin else 'false'
             else:
-                cors_origin = origin if origin else '*'
-                cors_credentials = 'false'
+                # Allow all origins in Vercel environment
+                cors_origin = origin if origin != '*' else '*'
+                cors_credentials = 'true' if origin and origin != '*' else 'false'
             
             return {
                 'statusCode': 200,
@@ -126,21 +138,12 @@ def handler(request):
             parsed_url = urlparse(request['url'])
             query_string = parsed_url.query
         
-        # Get headers
-        headers_dict = request.get('headers', {})
-        if not isinstance(headers_dict, dict):
-            # Try to convert to dict
-            if hasattr(headers_dict, '__dict__'):
-                headers_dict = headers_dict.__dict__
-            else:
-                headers_dict = {}
-        
         # Build WSGI environ
         environ = {
             'REQUEST_METHOD': method,
             'PATH_INFO': path,
             'QUERY_STRING': query_string,
-            'CONTENT_TYPE': headers_dict.get('content-type', headers_dict.get('Content-Type', '')),
+            'CONTENT_TYPE': headers_dict.get('content-type', ''),
             'CONTENT_LENGTH': str(len(body)),
             'SERVER_NAME': 'localhost',
             'SERVER_PORT': '443',
@@ -191,30 +194,33 @@ def handler(request):
         final_headers = {name: value for name, value in response_headers}
         
         # Always add CORS headers to ensure they're present
-        origin = headers_dict.get('origin') or headers_dict.get('Origin')
+        # Get origin from headers (case-insensitive now)
+        origin = headers_dict.get('origin', '*')
         
-        # In production (Vercel), allow all vercel.app domains
-        if origin and (origin.endswith('.vercel.app') or origin.endswith('vercel.app')):
+        # Debug logging (will appear in Vercel logs)
+        print(f"Request origin: {origin}")
+        print(f"All headers: {headers_dict}")
+        
+        # ALWAYS set CORS headers - override any Flask headers
+        # In Vercel, allow the specific origin if it's a vercel.app domain, otherwise allow all
+        if origin and origin != '*' and (origin.endswith('.vercel.app') or origin.endswith('vercel.app')):
             final_headers['Access-Control-Allow-Origin'] = origin
             final_headers['Access-Control-Allow-Credentials'] = 'true'
-        elif os.getenv('VERCEL') or os.getenv('VERCEL_ENV'):
-            # In Vercel environment, allow the origin if provided, otherwise allow all
-            if origin:
-                final_headers['Access-Control-Allow-Origin'] = origin
-                final_headers['Access-Control-Allow-Credentials'] = 'true'
-            else:
-                final_headers['Access-Control-Allow-Origin'] = '*'
+            print(f"Setting CORS origin to: {origin}")
         else:
-            # Development or other environments - allow all
-            final_headers['Access-Control-Allow-Origin'] = origin if origin else '*'
+            # Allow all origins (or the specific origin if provided)
+            cors_origin = origin if origin != '*' else '*'
+            final_headers['Access-Control-Allow-Origin'] = cors_origin
+            if origin and origin != '*':
+                final_headers['Access-Control-Allow-Credentials'] = 'true'
+            print(f"Setting CORS origin to: {cors_origin}")
         
-        # Add other CORS headers if not already present
-        if 'Access-Control-Allow-Headers' not in final_headers:
-            final_headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        if 'Access-Control-Allow-Methods' not in final_headers:
-            final_headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-        if 'Access-Control-Expose-Headers' not in final_headers:
-            final_headers['Access-Control-Expose-Headers'] = 'Authorization'
+        # ALWAYS set these CORS headers (override any existing ones)
+        final_headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        final_headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        final_headers['Access-Control-Expose-Headers'] = 'Authorization'
+        
+        print(f"Final response headers: {final_headers}")
         
         return {
             'statusCode': status_code[0],
@@ -227,9 +233,27 @@ def handler(request):
         # Log error (will appear in Vercel logs)
         print(f"Error in handler: {str(e)}")
         print(error_trace)
+        
+        # Get origin for CORS even in error case
+        try:
+            headers_dict_raw = request.get('headers', {}) if isinstance(request, dict) else {}
+            if not isinstance(headers_dict_raw, dict):
+                headers_dict_raw = {}
+            headers_dict = {k.lower(): v for k, v in headers_dict_raw.items()}
+            origin = headers_dict.get('origin', '*')
+            cors_origin = origin if origin != '*' and origin.endswith('.vercel.app') else '*'
+        except:
+            cors_origin = '*'
+        
         return {
             'statusCode': 500,
-            'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': cors_origin,
+                'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+                'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+                'Access-Control-Expose-Headers': 'Authorization'
+            },
             'body': json.dumps({
                 'error': str(e),
                 'type': type(e).__name__,
