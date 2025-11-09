@@ -11,11 +11,18 @@ sys.path.insert(0, os.path.abspath(server_path))
 try:
     from app import create_app
     # Create Flask app instance
+    print("DEBUG - Initializing Flask app...")
     app = create_app()
+    print("DEBUG - Flask app initialized successfully")
 except Exception as e:
     # If app creation fails, we'll handle it in the handler
+    import traceback
+    app_init_trace = traceback.format_exc()
+    print(f"ERROR - Failed to initialize Flask app: {str(e)}")
+    print(f"ERROR - App init traceback:\n{app_init_trace}")
     app = None
     app_error = str(e)
+    app_error_trace = app_init_trace
 
 def handler(request):
     """
@@ -32,10 +39,36 @@ def handler(request):
         
         # Handle app initialization error
         if app is None:
+            print(f"ERROR - Flask app is None, returning initialization error")
+            # Get origin for CORS
+            cors_origin = '*'
+            try:
+                if isinstance(request, dict):
+                    headers_dict_raw = request.get('headers', {})
+                    if isinstance(headers_dict_raw, dict):
+                        headers_dict = {k.lower(): v for k, v in headers_dict_raw.items()}
+                        origin = headers_dict.get('origin', '*')
+                        if origin != '*' and ('.vercel.app' in origin or origin.endswith('vercel.app')):
+                            cors_origin = origin
+            except:
+                pass
+            
             return {
                 'statusCode': 500,
-                'headers': {'Content-Type': 'application/json'},
-                'body': json.dumps({'error': f'Failed to initialize Flask app: {app_error}'})
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': cors_origin,
+                    'access-control-allow-origin': cors_origin,
+                    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+                    'access-control-allow-headers': 'Content-Type, Authorization',
+                    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+                    'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS'
+                },
+                'body': json.dumps({
+                    'error': f'Failed to initialize Flask app: {app_error}',
+                    'type': 'InitializationError',
+                    'message': 'A server error has occurred'
+                })
             }
         
         # Vercel Python runtime passes request as a dict
@@ -201,14 +234,23 @@ def handler(request):
             response_headers.extend(response_headers_list)
         
         # Call Flask app
-        app_iter = app(environ, start_response)
-        
         try:
-            for data in app_iter:
-                response_data.append(data)
-        finally:
-            if hasattr(app_iter, 'close'):
-                app_iter.close()
+            print(f"DEBUG - Calling Flask app with path: {path}, method: {method}")
+            app_iter = app(environ, start_response)
+            
+            try:
+                for data in app_iter:
+                    response_data.append(data)
+            finally:
+                if hasattr(app_iter, 'close'):
+                    app_iter.close()
+        except Exception as flask_error:
+            import traceback
+            flask_trace = traceback.format_exc()
+            print(f"ERROR - Flask app raised exception: {str(flask_error)}")
+            print(f"ERROR - Flask traceback: {flask_trace}")
+            # Re-raise to be caught by outer handler
+            raise
         
         # Build response
         response_body = b''.join(response_data)
@@ -274,32 +316,46 @@ def handler(request):
         import traceback
         error_trace = traceback.format_exc()
         # Log error (will appear in Vercel logs)
-        print(f"Error in handler: {str(e)}")
-        print(error_trace)
+        print(f"ERROR - Exception in handler: {str(e)}")
+        print(f"ERROR - Exception type: {type(e).__name__}")
+        print(f"ERROR - Full traceback:\n{error_trace}")
         
         # Get origin for CORS even in error case
+        cors_origin = '*'
         try:
-            headers_dict_raw = request.get('headers', {}) if isinstance(request, dict) else {}
-            if not isinstance(headers_dict_raw, dict):
-                headers_dict_raw = {}
-            headers_dict = {k.lower(): v for k, v in headers_dict_raw.items()}
-            origin = headers_dict.get('origin', '*')
-            cors_origin = origin if origin != '*' and origin.endswith('.vercel.app') else '*'
-        except:
-            cors_origin = '*'
+            if isinstance(request, dict):
+                headers_dict_raw = request.get('headers', {})
+                if isinstance(headers_dict_raw, dict):
+                    headers_dict = {k.lower(): v for k, v in headers_dict_raw.items()}
+                    origin = headers_dict.get('origin', '*')
+                    if origin != '*' and ('.vercel.app' in origin or origin.endswith('vercel.app')):
+                        cors_origin = origin
+        except Exception as cors_error:
+            print(f"ERROR - Failed to extract origin for CORS: {str(cors_error)}")
         
-        return {
+        # Build error response with CORS headers
+        error_response = {
             'statusCode': 500,
             'headers': {
                 'Content-Type': 'application/json',
                 'Access-Control-Allow-Origin': cors_origin,
+                'access-control-allow-origin': cors_origin,
                 'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+                'access-control-allow-headers': 'Content-Type, Authorization',
                 'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-                'Access-Control-Expose-Headers': 'Authorization'
+                'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
+                'Access-Control-Expose-Headers': 'Authorization',
+                'access-control-expose-headers': 'Authorization'
             },
             'body': json.dumps({
                 'error': str(e),
                 'type': type(e).__name__,
-                'traceback': error_trace
+                'message': 'A server error has occurred'
             })
         }
+        
+        # Ensure all header values are strings
+        error_response['headers'] = {str(k): str(v) for k, v in error_response['headers'].items()}
+        
+        print(f"ERROR - Returning error response with status 500")
+        return error_response
