@@ -2,50 +2,75 @@ import sys
 import os
 import json
 from io import BytesIO
+from urllib.parse import urlparse, parse_qs, quote
 
 # Add the server directory to the path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'server'))
+server_path = os.path.join(os.path.dirname(__file__), '..', 'server')
+sys.path.insert(0, os.path.abspath(server_path))
 
-from app import create_app
-
-# Create Flask app instance
-app = create_app()
+try:
+    from app import create_app
+    # Create Flask app instance
+    app = create_app()
+except Exception as e:
+    # If app creation fails, we'll handle it in the handler
+    app = None
+    app_error = str(e)
 
 def handler(request):
     """
     Vercel serverless function handler for Flask app
     """
     try:
-        # Extract path from request - handle both Vercel request formats
-        if hasattr(request, 'path'):
-            path = request.path
-        elif isinstance(request, dict) and 'path' in request:
-            path = request['path']
-        else:
-            path = '/'
+        # Handle app initialization error
+        if app is None:
+            return {
+                'statusCode': 500,
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({'error': f'Failed to initialize Flask app: {app_error}'})
+            }
         
-        # Remove /api prefix if present
+        # Vercel Python runtime passes request as a dict
+        # Convert to dict if it's an object
+        if not isinstance(request, dict):
+            # Try to convert request object to dict
+            req_dict = {}
+            if hasattr(request, '__dict__'):
+                req_dict = request.__dict__
+            else:
+                # Try common attributes
+                for attr in ['path', 'method', 'headers', 'body', 'query', 'url']:
+                    if hasattr(request, attr):
+                        req_dict[attr] = getattr(request, attr)
+            request = req_dict
+        
+        # Extract path from request
+        path = request.get('path', '/')
+        
+        # If path is not in request, try to get from URL
+        if path == '/' and 'url' in request:
+            parsed_url = urlparse(request['url'])
+            path = parsed_url.path
+        
+        # Vercel rewrites send the full path (e.g., /listings/?query=...)
+        # We need to extract just the path part, not the query
+        if '?' in path:
+            path = path.split('?')[0]
+        
+        # Remove /api prefix if present (Vercel rewrites might add this)
         if path.startswith('/api'):
             path = path[4:] or '/'
+        
+        # Ensure path starts with /
         if not path.startswith('/'):
             path = '/' + path
         
         # Get HTTP method
-        if hasattr(request, 'method'):
-            method = request.method
-        elif isinstance(request, dict) and 'method' in request:
-            method = request['method']
-        else:
-            method = 'GET'
+        method = request.get('method', 'GET').upper()
         
         # Get request body
         body = b''
-        body_data = None
-        if hasattr(request, 'body'):
-            body_data = request.body
-        elif isinstance(request, dict) and 'body' in request:
-            body_data = request['body']
-            
+        body_data = request.get('body', '')
         if body_data:
             if isinstance(body_data, str):
                 body = body_data.encode('utf-8')
@@ -54,27 +79,35 @@ def handler(request):
             else:
                 body = json.dumps(body_data).encode('utf-8')
         
-        # Get query string
+        # Get query string from request
         query_string = ''
-        if hasattr(request, 'query_string'):
-            query_string = request.query_string or ''
-        elif isinstance(request, dict) and 'query' in request:
+        if 'query' in request:
             query = request['query']
             if isinstance(query, dict):
-                query_string = '&'.join([f'{k}={v}' for k, v in query.items()])
-            else:
-                query_string = str(query)
-        elif hasattr(request, 'query'):
-            query = request.query
-            if isinstance(query, dict):
-                query_string = '&'.join([f'{k}={v}' for k, v in query.items()])
+                # Convert dict to query string
+                query_parts = []
+                for k, v in query.items():
+                    if isinstance(v, list):
+                        for item in v:
+                            query_parts.append(f'{quote(str(k))}={quote(str(item))}')
+                    else:
+                        query_parts.append(f'{quote(str(k))}={quote(str(v))}')
+                query_string = '&'.join(query_parts)
+            elif isinstance(query, str):
+                query_string = query
+        elif 'url' in request:
+            # Extract query from URL
+            parsed_url = urlparse(request['url'])
+            query_string = parsed_url.query
         
         # Get headers
-        headers_dict = {}
-        if hasattr(request, 'headers'):
-            headers_dict = dict(request.headers)
-        elif isinstance(request, dict) and 'headers' in request:
-            headers_dict = request['headers']
+        headers_dict = request.get('headers', {})
+        if not isinstance(headers_dict, dict):
+            # Try to convert to dict
+            if hasattr(headers_dict, '__dict__'):
+                headers_dict = headers_dict.__dict__
+            else:
+                headers_dict = {}
         
         # Build WSGI environ
         environ = {
@@ -94,11 +127,12 @@ def handler(request):
             'wsgi.run_once': False,
         }
         
-        # Add HTTP headers
+        # Add HTTP headers to environ
         for key, value in headers_dict.items():
-            key_upper = key.upper().replace('-', '_')
-            if key_upper not in ('CONTENT_TYPE', 'CONTENT_LENGTH'):
-                environ[f'HTTP_{key_upper}'] = value
+            if value is not None:
+                key_upper = key.upper().replace('-', '_')
+                if key_upper not in ('CONTENT_TYPE', 'CONTENT_LENGTH'):
+                    environ[f'HTTP_{key_upper}'] = str(value)
         
         # Response data
         response_data = []
@@ -137,9 +171,16 @@ def handler(request):
         }
     except Exception as e:
         import traceback
-        traceback.print_exc()
+        error_trace = traceback.format_exc()
+        # Log error (will appear in Vercel logs)
+        print(f"Error in handler: {str(e)}")
+        print(error_trace)
         return {
             'statusCode': 500,
-            'headers': {'Content-Type': 'application/json'},
-            'body': json.dumps({'error': str(e), 'traceback': traceback.format_exc()})
+            'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+            'body': json.dumps({
+                'error': str(e),
+                'type': type(e).__name__,
+                'traceback': error_trace
+            })
         }
